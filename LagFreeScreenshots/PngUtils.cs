@@ -32,9 +32,8 @@ namespace LagFreeScreenshots
             return c ^ 0xffffffff;
         }
 
-        internal static byte[] ProducePngDescriptionTextChunk(string text)
+        internal static byte[] ProducePngDescriptionTextChunk(string keyword, string text)
         {
-            var keyword = "Description";
             var chunkDataSize = keyword.Length + 1 + 1 + 1 + 1 + 1 + Encoding.UTF8.GetByteCount(text);
             var chunkBytes = new byte[12 + chunkDataSize];
             chunkBytes[0] = (byte) (chunkDataSize >> 24);
