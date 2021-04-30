@@ -36,21 +36,69 @@ namespace LagFreeScreenshots
 {
     public class LagFreeScreenshotsMod : MelonMod
     {
+        private class Metadata
+        {
+            private const int ArtistExif = 0x013B;
+            public string Author
+            {
+                get => _data.TryGetValue(nameof(Author), out var value) ? value : string.Empty;
+                set => _data[nameof(Author)] = value;
+            }
+            
+            public string AuthorId
+            {
+                get => _data.TryGetValue(nameof(AuthorId), out var value) ? value : string.Empty;
+                set => _data[nameof(AuthorId)] = value;
+            }
+
+            public string World
+            {
+                get => _data.TryGetValue(nameof(World), out var value) ? value : string.Empty;
+                set => _data[nameof(World)] = value;
+            }
+            
+            public string WorldId
+            {
+                get => _data.TryGetValue(nameof(WorldId), out var value) ? value : string.Empty;
+                set => _data[nameof(WorldId)] = value;
+            }
+            
+            public string Position
+            {
+                get => _data.TryGetValue(nameof(Position), out var value) ? value : string.Empty;
+                set => _data[nameof(Position)] = value;
+            }
+
+            public string Players
+            {
+                get => _data.TryGetValue(nameof(Players), out var value) ? value : string.Empty;
+                set => _data[nameof(Players)] = value;
+            }
+            
+            public string PlayerIds
+            {
+                get => _data.TryGetValue(nameof(PlayerIds), out var value) ? value : string.Empty;
+                set => _data[nameof(PlayerIds)] = value;
+            }
+            
+            private Dictionary<string, string> _data = new Dictionary<string, string>();
+
+            public string Set(string keyword, string value) => _data[keyword] = value;
+            public IEnumerable<(string keyword, string value)> Get() => _data.Select(d => (d.Key, d.Value));
+        }
+        
         private static readonly AwaitProvider ourToMainThread = new AwaitProvider();
         private static readonly AwaitProvider ourToEndOfFrame = new AwaitProvider();
 
         private const string SettingsCategory = "LagFreeScreenshots";
         private const string SettingEnableMod = "Enabled";
         private const string SettingScreenshotFormat = "ScreenshotFormat";
-        private const string SettingJpegPercent = "JpegPercent";
         private const string SettingAutorotation = "Auto-rotation";
-        private const string SettingMetadata = "Metadata";
+        private const string SettingFileNamePlayers = "FileNamePlayers";
 
         private static MelonPreferences_Entry<bool> ourEnabled;
-        private static MelonPreferences_Entry<string> ourFormat;
-        private static MelonPreferences_Entry<int> ourJpegPercent;
         private static MelonPreferences_Entry<bool> ourAutorotation;
-        private static MelonPreferences_Entry<bool> ourMetadata;
+        private static MelonPreferences_Entry<bool> ourSaveFileNamePlayers;
 
         private static Thread ourMainThread;
 
@@ -58,10 +106,8 @@ namespace LagFreeScreenshots
         {
             var category = MelonPreferences.CreateCategory(SettingsCategory, "Lag Free Screenshots");
             ourEnabled = (MelonPreferences_Entry<bool>) category.CreateEntry(SettingEnableMod, true, "Enabled");
-            ourFormat = (MelonPreferences_Entry<string>) category.CreateEntry( SettingScreenshotFormat, "png", "Screenshot format");
-            ourJpegPercent = (MelonPreferences_Entry<int>) category.CreateEntry(SettingJpegPercent, 95, "JPEG quality (0-100)");
             ourAutorotation = (MelonPreferences_Entry<bool>)category.CreateEntry(SettingAutorotation, true, "Rotate picture to match camera");
-            ourMetadata = (MelonPreferences_Entry<bool>)category.CreateEntry(SettingMetadata, false, "Save metadata in picture");
+            ourSaveFileNamePlayers = (MelonPreferences_Entry<bool>)category.CreateEntry(SettingFileNamePlayers, false, "Replace filename with names of players in view");
 
             Harmony.Patch(
                 typeof(CameraTakePhotoEnumerator).GetMethod("MoveNext"),
@@ -89,12 +135,14 @@ namespace LagFreeScreenshots
             return 0;
         }
 
-        private static string GetPlayerList(Camera camera)
+        private static (string playerNames, string playerIds)? GetPlayerList(Camera camera, string separator)
         {
             var playerManager = PlayerManager.field_Private_Static_PlayerManager_0;
-            if (playerManager == null) return "";
 
-            var result = new List<string>();
+            if (playerManager == null) return null;
+
+            var result = new List<(string name, string id, float zDistance)>();
+
 
             var localPlayer = VRCPlayer.field_Internal_Static_VRCPlayer_0;
             var localPosition = localPlayer.gameObject.transform.position;
@@ -102,40 +150,61 @@ namespace LagFreeScreenshots
             foreach (var p in playerManager.field_Private_List_1_Player_0)
             {
                 var avatarRoot = p.prop_VRCPlayer_0.prop_VRCAvatarManager_0.transform.Find("Avatar");
-                var playerPositionTransform = avatarRoot?.GetComponent<Animator>()?.GetBoneTransform(HumanBodyBones.Head) ?? p.transform;
+                
+                Animator animator;
+                Transform playerPositionTransform;
+                if (avatarRoot != null && (animator = avatarRoot.GetComponent<Animator>()) != null)
+                {
+                    playerPositionTransform = animator.GetBoneTransform(HumanBodyBones.Head);
+                }
+                else
+                {
+                    playerPositionTransform = p.transform;
+                }
+                
                 var playerPosition = playerPositionTransform.position;
                 Vector3 viewPos = camera.WorldToViewportPoint(playerPosition);
-                var playerDescriptor = p.prop_APIUser_0.id + "," +
-                                       viewPos.x.ToString("0.00", CultureInfo.InvariantCulture) + "," +
-                                       viewPos.y.ToString("0.00", CultureInfo.InvariantCulture) + "," +
-                                       viewPos.z.ToString("0.00", CultureInfo.InvariantCulture) + "," +
-                                       p.prop_APIUser_0.displayName;
+                var playerDescriptor = p.prop_APIUser_0.displayName;
                 
+                if (string.Equals(playerDescriptor, APIUser.CurrentUser.displayName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                bool shouldAdd = false;
                 if (viewPos.z < 2 && Vector3.Distance(localPosition, playerPosition) < 2)
                 {
                     //User standing right next to photographer, might be visible (approx.)
-                    result.Add(playerDescriptor);
+                    shouldAdd = true;
                 }
                 else if (viewPos.x > -0.03 && viewPos.x < 1.03 && viewPos.y > -0.03 && viewPos.y < 1.03 && viewPos.z > 2 && viewPos.z < 30)
                 {
                     //User in viewport, might be obstructed but still...
-                    result.Add(playerDescriptor);
+                    shouldAdd = true;
+                }
+
+                if (shouldAdd)
+                {
+                    result.Add((playerDescriptor.Replace(separator, ""), p.prop_APIUser_0.id, viewPos.z));
                 }
             }
 
-            return String.Join(";", result);
+            if (!result.Any())
+            {
+                return null;
+            }
+
+            result = result.OrderBy(x => x.zDistance).ToList();
+            return (string.Join(separator, result.Select(x => x.name)), string.Join(separator, result.Select(x => x.id)));
         }
 
-        private static string GetPhotographerMeta()
-        {
-            return APIUser.CurrentUser.id + "," + APIUser.CurrentUser.displayName;
-        }
+        private static string GetPhotographerMeta() => APIUser.CurrentUser.displayName;
 
-        private static string GetWorldMeta()
+        private static (string worldName, string worldId)? GetWorldMeta()
         {
             var apiWorld = RoomManager.field_Internal_Static_ApiWorld_0;
-            if (apiWorld == null) return "null,0,Not in any world";
-            return apiWorld.id + "," + RoomManager.field_Internal_Static_ApiWorldInstance_0.idOnly + "," + apiWorld.name;
+            if (apiWorld == null) return null;
+            return (apiWorld.name, apiWorld.id);
         }
 
         private static string GetPosition()
@@ -268,18 +337,53 @@ namespace LagFreeScreenshots
             if (ourAutorotation.Value) 
                 rotationQuarters = GetPictureAutorotation(camera);
 
-            if (ourMetadata.Value)
+            string separator = ";";
+            
+            var author = GetPhotographerMeta();
+            var world = GetWorldMeta();
+            var pos = GetPosition();
+            var players = GetPlayerList(camera, separator);
+            
+            var metadata = new Metadata
             {
-                metadataStr = "lfs|2|author:" + GetPhotographerMeta() + "|world:" + GetWorldMeta() + "|pos:" +
-                              GetPosition();
-                if (ourAutorotation.Value)
+                Author = author,
+                Position = pos,
+            };
+
+            if (world.HasValue)
+            {
+                metadata.World = world.Value.worldName;
+                metadata.WorldId = world.Value.worldId;
+            }
+            
+            if (players.HasValue)
+            {
+                metadata.Players = players.Value.playerNames;
+                metadata.PlayerIds = players.Value.playerIds;
+                
+                if (ourSaveFileNamePlayers.Value)
                 {
-                    metadataStr += "|rq:" + rotationQuarters;
+                    var names = metadata.Players.Replace(separator, "] [");
+                    var invalids = Path.GetInvalidFileNameChars();
+                    var sanitizedNames = String.Join("_", names.Split(invalids, StringSplitOptions.RemoveEmptyEntries) );
+                    try
+                    {
+                        var extension = ".png";
+                        var dir = Path.GetDirectoryName(targetFile);
+                        var characters = dir!.Replace(@"\", @"\\").Length + extension.Length + 4;
+
+                        const int MAX_PATH = 255;
+                        string final = (characters + sanitizedNames.Length > MAX_PATH) ? sanitizedNames.Substring(0, MAX_PATH - characters) : sanitizedNames;
+                        targetFile = Path.Combine(dir ,$"[{final}]{extension}");
+                    }
+                    catch (PathTooLongException e)
+                    {
+                        MelonLogger.Error($"File path was too long - it's a bug!\n{e}");
+                    }
                 }
-                metadataStr += "|players:" + GetPlayerList(camera);
             }
 
-            await EncodeAndSavePicture(targetFile, data, w, h, hasAlpha, rotationQuarters, metadataStr)
+            await EncodeAndSavePicture(targetFile, data, w, h, hasAlpha, rotationQuarters, metadata)
                 .ConfigureAwait(false);
         }
         
@@ -354,7 +458,7 @@ namespace LagFreeScreenshots
 
 
         private static async Task EncodeAndSavePicture(string filePath, (IntPtr, int Length) pixelsPair, int w, int h,
-            bool hasAlpha, int rotationQuarters, string description)
+            bool hasAlpha, int rotationQuarters, Metadata metadata)
         {
             if (pixelsPair.Item1 == IntPtr.Zero) return;
             
@@ -417,51 +521,23 @@ namespace LagFreeScreenshots
 
             bitmap.UnlockBits(bitmapData);
             Marshal.FreeHGlobal(pixelsPair.Item1);
+            
 
-            // https://docs.microsoft.com/en-us/windows/win32/gdiplus/-gdiplus-constant-property-item-descriptions
-            if (description != null)
+            bitmap.Save(filePath, ImageFormat.Png);
+            if (metadata != null)
             {
-                // png description is saved as iTXt chunk manually
-                if (ourFormat.Value == "jpeg")
+                using var pngStream = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite);
+                var originalEndChunkBytes = new byte[12];
+                pngStream.Position = pngStream.Length - 12;
+                pngStream.Read(originalEndChunkBytes, 0, 12);
+                pngStream.Position = pngStream.Length - 12;
+                foreach (var kv in metadata.Get())
                 {
-                    var stringBytesCount = Encoding.Unicode.GetByteCount(description);
-                    var allBytes = new byte[8 + stringBytesCount];
-                    Encoding.ASCII.GetBytes("UNICODE\0", 0, 8, allBytes, 0);
-                    Encoding.Unicode.GetBytes(description, 0, description.Length, allBytes, 8);
-
-                    var pi = (PropertyItem) FormatterServices.GetUninitializedObject(typeof(PropertyItem));
-                    pi.Type = 7; // PropertyTagTypeUndefined
-                    pi.Id = 0x9286; // PropertyTagExifUserComment
-                    pi.Value = allBytes;
-                    pi.Len = pi.Value.Length;
-                    bitmap.SetPropertyItem(pi);
+                    var itxtChunk = PngUtils.ProducePngDescriptionTextChunk(kv.keyword, kv.value);
+                    pngStream.Write(itxtChunk, 0, itxtChunk.Length);  
                 }
-            }
 
-            if (ourFormat.Value == "jpeg")
-            {
-                var encoder = GetEncoder(ImageFormat.Jpeg);
-                using var parameters = new EncoderParameters(1)
-                {
-                    Param = {[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, ourJpegPercent.Value)}
-                };
-                filePath = Path.ChangeExtension(filePath, ".jpeg");
-                bitmap.Save(filePath, encoder, parameters);
-            }
-            else
-            {
-                bitmap.Save(filePath, ImageFormat.Png);
-                if (description != null)
-                {
-                    using var pngStream = new FileStream(filePath, FileMode.Open, FileAccess.ReadWrite);
-                    var originalEndChunkBytes = new byte[12];
-                    pngStream.Position = pngStream.Length - 12;
-                    pngStream.Read(originalEndChunkBytes, 0, 12);
-                    pngStream.Position = pngStream.Length - 12;
-                    var itxtChunk = PngUtils.ProducePngDescriptionTextChunk(description);
-                    pngStream.Write(itxtChunk, 0, itxtChunk.Length);
-                    pngStream.Write(originalEndChunkBytes, 0, originalEndChunkBytes.Length);
-                }
+                pngStream.Write(originalEndChunkBytes, 0, originalEndChunkBytes.Length);
             }
 
             await ourToMainThread.Yield();
